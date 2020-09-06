@@ -1,13 +1,15 @@
 use byteorder::{ByteOrder, LittleEndian};
 use std::io;
 use std::io::prelude::*;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncRead;
 
 const U24_MAX: usize = 16_777_215;
 
 pub struct PacketWriter<W> {
     to_write: Vec<u8>,
     seq: u8,
-    w: W,
+    pub w: W,
 }
 
 impl<W: Write> Write for PacketWriter<W> {
@@ -65,7 +67,7 @@ pub struct PacketReader<R> {
     bytes: Vec<u8>,
     start: usize,
     remaining: usize,
-    r: R,
+    pub r: R,
 }
 
 impl<R> PacketReader<R> {
@@ -75,6 +77,61 @@ impl<R> PacketReader<R> {
             start: 0,
             remaining: 0,
             r,
+        }
+    }
+}
+
+impl<R: AsyncRead + Unpin> PacketReader<R> {
+    pub async fn next_async(&mut self) -> io::Result<Option<(u8, Packet<'_>)>> {
+        self.start = self.bytes.len() - self.remaining;
+
+        loop {
+            if self.remaining != 0 {
+                let bytes = {
+                    // NOTE: this is all sorts of unfortunate. what we really want to do is to give
+                    // &self.bytes[self.start..] to `packet()`, and the lifetimes should all work
+                    // out. however, without NLL, borrowck doesn't realize that self.bytes is no
+                    // longer borrowed after the match, and so can be mutated.
+                    let bytes = &self.bytes[self.start..];
+                    unsafe { ::std::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) }
+                };
+                match packet(bytes) {
+                    Ok((rest, p)) => {
+                        self.remaining = rest.len();
+                        return Ok(Some(p));
+                    }
+                    Err(nom::Err::Incomplete(_)) | Err(nom::Err::Error(_)) => {}
+                    Err(nom::Err::Failure(ctx)) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("{:?}", ctx),
+                        ))
+                    }
+                }
+            }
+
+            // we need to read some more
+            self.bytes.drain(0..self.start);
+            self.start = 0;
+            let end = self.bytes.len();
+            self.bytes.resize(std::cmp::max(4096, end * 2), 0);
+            let read = {
+                let mut buf = &mut self.bytes[end..];
+                self.r.read(&mut buf).await?
+            };
+            self.bytes.truncate(end + read);
+            self.remaining = self.bytes.len();
+
+            if read == 0 {
+                if self.bytes.is_empty() {
+                    return Ok(None);
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        format!("{} unhandled bytes", self.bytes.len()),
+                    ));
+                }
+            }
         }
     }
 }
