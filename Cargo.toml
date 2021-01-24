@@ -28,7 +28,7 @@ mysql_common = "0.22"
 byteorder = "1"
 chrono = "0.4"
 time = "=0.2.7"
-tokio = { version = "0.2", features = ["io-util", "stream", "tcp", "io-std"] }
+tokio = { version = "1.0", features = ["io-util", "io-std"] }
 async-trait = "0.1.40"
 
 [dev-dependencies]
@@ -36,5 +36,5 @@ postgres = "0.15"
 mysql = "18"
 mysql_async = "0.20.0"
 slab = "0.4.2"
-tokio = "0.1.19"
+tokio = { version = "1.0", features = ["full"] }
 futures = "0.1.26"

@@ -93,7 +93,7 @@ where
     fn test<C, F>(self, c: C)
     where
         F: IntoFuture<Item = (), Error = mysql_async::error::Error>,
-        C: FnOnce(mysql_async::Conn) -> F,
+        C: FnOnce(mysql_async::Conn) -> F + Send + Sync + 'static,
     {
         let listener = net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -102,10 +102,9 @@ where
             MysqlIntermediary::run_on_tcp(self, s)
         });
 
-        tokio::runtime::current_thread::block_on_all(
-            mysql_async::Conn::new(format!("mysql://127.0.0.1:{}", port)).and_then(|conn| c(conn)),
-        )
-        .unwrap();
+        thread::spawn(move || {
+            mysql_async::Conn::new(format!("mysql://127.0.0.1:{}", port)).and_then(|conn| c(conn)).wait()
+        }).join().unwrap().unwrap();
 
         jh.join().unwrap().unwrap();
     }
@@ -221,14 +220,15 @@ fn really_long_query() {
 
 #[test]
 fn error_response() {
-    let err = (ErrorKind::ER_NO, "clearly not");
+    let err = (ErrorKind::ER_NO, "clearly not".to_string());
+    let err_to_move = err.clone();
     TestingShim::new(
-        move |_, w| w.error(err.0, err.1.as_bytes()),
+        move |_, w| w.error(err_to_move.0, err_to_move.1.as_bytes()),
         |_| unreachable!(),
         |_, _, _| unreachable!(),
     )
-    .test(|db| {
-        db.query("SELECT a, b FROM foo").then(|r| {
+    .test(move |db| {
+        db.query("SELECT a, b FROM foo").then(move |r| {
             match r {
                 Ok(_) => assert!(false),
                 Err(mysql_async::error::Error::Server(mysql_async::error::ServerError {
