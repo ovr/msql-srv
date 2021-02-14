@@ -1,14 +1,14 @@
 use crate::myc::constants::{CapabilityFlags, Command as CommandByte};
 
 #[derive(Debug)]
-pub struct ClientHandshake<'a> {
+pub struct ClientHandshake {
     capabilities: CapabilityFlags,
     maxps: u32,
     collation: u16,
-    username: &'a [u8],
+    pub username: Vec<u8>,
 }
 
-pub fn client_handshake(i: &[u8]) -> nom::IResult<&[u8], ClientHandshake<'_>> {
+pub fn client_handshake(i: &[u8]) -> nom::IResult<&[u8], ClientHandshake> {
     // mysql handshake protocol documentation
     // https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_connection_phase_packets_protocol_handshake_response.html
 
@@ -32,7 +32,7 @@ pub fn client_handshake(i: &[u8]) -> nom::IResult<&[u8], ClientHandshake<'_>> {
                 capabilities: CapabilityFlags::from_bits_truncate(cap),
                 maxps,
                 collation: u16::from(collation[0]),
-                username,
+                username: username.to_vec(),
             },
         ))
     } else {
@@ -48,7 +48,7 @@ pub fn client_handshake(i: &[u8]) -> nom::IResult<&[u8], ClientHandshake<'_>> {
                 capabilities: CapabilityFlags::from_bits_truncate(cap as u32),
                 maxps,
                 collation: 0,
-                username,
+                username: username.to_vec(),
             },
         ))
     }

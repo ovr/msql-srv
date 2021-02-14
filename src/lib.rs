@@ -139,6 +139,8 @@ pub use crate::params::{ParamParser, ParamValue, Params};
 pub use crate::resultset::{InitWriter, QueryResultWriter, RowWriter, StatementMetaWriter};
 pub use crate::value::{ToMysqlValue, Value, ValueInner};
 use std::io::Cursor;
+use crate::writers::write_handshake_packet;
+use nom::AsBytes;
 
 /// Implementors of this trait can be used to drive a MySQL-compatible database backend.
 pub trait MysqlShim<W: Write> {
@@ -240,6 +242,14 @@ pub trait AsyncMysqlShim<W: Write + Send> {
     /// Called when client switches database.
     async fn on_init<'a>(&'a mut self, _: &'a str, _: InitWriter<'a, W>) -> Result<(), Self::Error> {
         Ok(())
+    }
+
+    /// Return Some if auth is required
+    async fn on_auth<'a>(&'a mut self, _user: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>, Self::Error>
+        where
+            W: 'async_trait
+    {
+        Ok(None)
     }
 }
 
@@ -489,36 +499,25 @@ impl<B: AsyncMysqlShim<Cursor<Vec<u8>>> + Send, R: AsyncRead + AsyncWrite + Unpi
             reader: r,
             writer: w
         };
-        mi.init().await?;
+        if !mi.init().await? {
+            return Ok(());
+        }
         mi.run().await
     }
 
-    async fn init(&mut self) -> Result<(), B::Error> {
-        self.writer.write_all(&[10])?; // protocol 10
-
-        // 5.1.10 because that's what Ruby's ActiveRecord requires
-        self.writer.write_all(&b"5.1.10-alpha-msql-proxy\0"[..])?;
-
-        self.writer.write_all(&[0x08, 0x00, 0x00, 0x00])?; // TODO: connection ID
-        self.writer.write_all(&b";X,po_k}\0"[..])?; // auth seed
-        self.writer.write_all(&[0x00, 0x42])?; // just 4.1 proto
-        self.writer.write_all(&[0x21])?; // UTF8_GENERAL_CI
-        self.writer.write_all(&[0x00, 0x00])?; // status flags
-        self.writer.write_all(&[0x00, 0x00])?; // extended capabilities
-        self.writer.write_all(&[0x00])?; // no plugins
-        self.writer.write_all(&[0x00; 6][..])?; // filler
-        self.writer.write_all(&[0x00; 4][..])?; // filler
-        self.writer.write_all(&b">o6^Wz!/kM}N\0"[..])?; // 4.1+ servers must extend salt
+    async fn init(&mut self) -> Result<bool, B::Error> {
+        let plugin = b"mysql_native_password";
+        write_handshake_packet(&mut self.writer, 8, plugin)?;
         self.writer_flush().await?;
 
-        {
+        let handshake = {
             let (seq, handshake) = self.reader.next_async().await?.ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::ConnectionAborted,
                     "peer terminated connection",
                 )
             })?;
-            let _handshake = commands::client_handshake(&handshake)
+            let handshake = commands::client_handshake(&handshake)
                 .map_err(|e| match e {
                     nom::Err::Incomplete(_) => io::Error::new(
                         io::ErrorKind::UnexpectedEof,
@@ -541,12 +540,38 @@ impl<B: AsyncMysqlShim<Cursor<Vec<u8>>> + Send, R: AsyncRead + AsyncWrite + Unpi
                 })?
                 .1;
             self.writer.set_seq(seq + 1);
+            handshake
+        };
+
+        let auth_option = self.shim.on_auth(handshake.username.to_vec()).await?;
+
+        if let Some((nonce, password)) = auth_option {
+            if nonce.is_empty() {
+                writers::write_err(ErrorKind::ER_PASSWORD_NO_MATCH, b"Incorrect user name or password", &mut self.writer)?;
+                self.writer_flush().await?;
+                return Ok(false);
+            } else {
+                writers::write_auth_switch_packet(&mut self.writer, plugin, nonce.as_slice())?;
+                self.writer_flush().await?;
+                let (seq, auth) = self.reader.next_async().await?.ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::ConnectionAborted,
+                        "peer terminated connection",
+                    )
+                })?;
+                self.writer.set_seq(seq + 1);
+                if auth.as_bytes() != password.as_slice() {
+                    writers::write_err(ErrorKind::ER_PASSWORD_NO_MATCH, b"Incorrect user name or password", &mut self.writer)?;
+                    self.writer_flush().await?;
+                    return Ok(false);
+                }
+            }
         }
 
         writers::write_ok_packet(&mut self.writer, 0, 0, StatusFlags::empty())?;
         self.writer_flush().await?;
 
-        Ok(())
+        Ok(true)
     }
 
     async fn writer_flush(&mut self) -> Result<(), B::Error> {

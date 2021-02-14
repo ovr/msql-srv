@@ -1,3 +1,4 @@
+#![feature(async_closure)]
 extern crate chrono;
 extern crate futures;
 extern crate msql_srv;
@@ -9,13 +10,13 @@ extern crate tokio;
 use futures::{Future, IntoFuture};
 use mysql_async::prelude::*;
 use std::io;
-use std::net;
-use std::thread;
 
-use msql_srv::{
-    Column, ErrorKind, MysqlIntermediary, MysqlShim, ParamParser, QueryResultWriter,
-    StatementMetaWriter,
-};
+use msql_srv::{Column, ErrorKind, ParamParser, QueryResultWriter, StatementMetaWriter, AsyncMysqlShim, AsyncMysqlIntermediary};
+use std::io::Cursor;
+use tokio::net::TcpListener;
+use async_trait::async_trait;
+use tokio::task;
+use myc::scramble::scramble_native;
 
 struct TestingShim<Q, P, E> {
     columns: Vec<Column>,
@@ -25,50 +26,64 @@ struct TestingShim<Q, P, E> {
     on_e: E,
 }
 
-impl<Q, P, E> MysqlShim<net::TcpStream> for TestingShim<Q, P, E>
+#[async_trait]
+impl<Q, P, E> AsyncMysqlShim<Cursor<Vec<u8>>> for TestingShim<Q, P, E>
 where
-    Q: FnMut(&str, QueryResultWriter<net::TcpStream>) -> io::Result<()>,
-    P: FnMut(&str) -> u32,
-    E: FnMut(u32, Vec<msql_srv::ParamValue>, QueryResultWriter<net::TcpStream>) -> io::Result<()>,
+    Q: 'static + Send + Sync + FnMut(&str, QueryResultWriter<Cursor<Vec<u8>>>) -> io::Result<()>,
+    P: 'static + Send + Sync+ FnMut(&str) -> u32,
+    E: 'static
+        + Send
+        + Sync
+        + FnMut(u32, Vec<msql_srv::ParamValue>, QueryResultWriter<Cursor<Vec<u8>>>) -> io::Result<()>,
 {
     type Error = io::Error;
 
-    fn on_prepare(
-        &mut self,
-        query: &str,
-        info: StatementMetaWriter<net::TcpStream>,
-    ) -> io::Result<()> {
+    async fn on_prepare<'a>(
+        &'a mut self,
+        query: &'a str,
+        info: StatementMetaWriter<'a, Cursor<Vec<u8>>>,
+    ) -> Result<(), Self::Error> {
         let id = (self.on_p)(query);
         info.reply(id, &self.params, &self.columns)
     }
 
-    fn on_execute(
-        &mut self,
+    async fn on_execute<'a>(
+        &'a mut self,
         id: u32,
-        params: ParamParser,
-        results: QueryResultWriter<net::TcpStream>,
-    ) -> io::Result<()> {
+        params: ParamParser<'a>,
+        results: QueryResultWriter<'a, Cursor<Vec<u8>>>,
+    ) -> Result<(), Self::Error> {
         (self.on_e)(id, params.into_iter().collect(), results)
     }
 
-    fn on_close(&mut self, _: u32) {}
+    async fn on_close<'a>(&'a mut self, _stmt: u32) {}
 
-    fn on_query(
-        &mut self,
-        query: &str,
-        results: QueryResultWriter<net::TcpStream>,
-    ) -> io::Result<()> {
+    async fn on_query<'a>(
+        &'a mut self,
+        query: &'a str,
+        results: QueryResultWriter<'a, Cursor<Vec<u8>>>,
+    ) -> Result<(), Self::Error> {
         (self.on_q)(query, results)
+    }
+
+    async fn on_auth<'a>(&'a mut self, user: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>, Self::Error> {
+        Ok(if user == b"foo" {
+            let nonce = vec![0x01, 0x02, 0x03, 0x04];
+            Some((nonce.clone(), scramble_native(nonce.as_slice(), b"bar").unwrap().to_vec()))
+        } else {
+            None
+        })
     }
 }
 
 impl<Q, P, E> TestingShim<Q, P, E>
 where
-    Q: 'static + Send + FnMut(&str, QueryResultWriter<net::TcpStream>) -> io::Result<()>,
-    P: 'static + Send + FnMut(&str) -> u32,
+    Q: 'static + Send + Sync + FnMut(&str, QueryResultWriter<Cursor<Vec<u8>>>) -> io::Result<()>,
+    P: 'static + Send + Sync+ FnMut(&str) -> u32,
     E: 'static
         + Send
-        + FnMut(u32, Vec<msql_srv::ParamValue>, QueryResultWriter<net::TcpStream>) -> io::Result<()>,
+        + Sync
+        + FnMut(u32, Vec<msql_srv::ParamValue>, QueryResultWriter<Cursor<Vec<u8>>>) -> io::Result<()>,
 {
     fn new(on_q: Q, on_p: P, on_e: E) -> Self {
         TestingShim {
@@ -90,48 +105,104 @@ where
         self
     }
 
-    fn test<C, F>(self, c: C)
+    async fn test<C, F>(self, c: C)
     where
         F: IntoFuture<Item = (), Error = mysql_async::error::Error>,
         C: FnOnce(mysql_async::Conn) -> F + Send + Sync + 'static,
     {
-        let listener = net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let jh = thread::spawn(move || {
-            let (s, _) = listener.accept().unwrap();
-            MysqlIntermediary::run_on_tcp(self, s)
+
+        let listen = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+
+            AsyncMysqlIntermediary::run_on(
+                self,
+                socket,
+            ).await.unwrap();
         });
 
-        thread::spawn(move || {
+        let conn = task::spawn_blocking(move || {
             mysql_async::Conn::new(format!("mysql://127.0.0.1:{}", port)).and_then(|conn| c(conn)).wait()
-        }).join().unwrap().unwrap();
+        });
 
-        jh.join().unwrap().unwrap();
+        let (r1, r2) = tokio::join!(listen, conn);
+
+        r1.unwrap();
+        r2.unwrap().unwrap();
+    }
+
+    async fn test_with_password<C, F>(self, c: C, user: String, password: String)
+        where
+            F: IntoFuture<Item = (), Error = mysql_async::error::Error>,
+            C: FnOnce(mysql_async::Conn) -> F + Send + Sync + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let listen = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+
+            AsyncMysqlIntermediary::run_on(
+                self,
+                socket,
+            ).await.unwrap();
+        });
+
+        let conn = task::spawn_blocking(move || {
+            mysql_async::Conn::new(format!("mysql://{}:{}@127.0.0.1:{}", user, password, port)).and_then(|conn| c(conn)).wait()
+        });
+
+        let (r1, r2) = tokio::join!(listen, conn);
+
+        r1.unwrap();
+        r2.unwrap().unwrap();
     }
 }
 
-#[test]
-fn it_connects() {
+#[tokio::test]
+async fn it_connects() {
     TestingShim::new(
         |_, _| unreachable!(),
         |_| unreachable!(),
         |_, _, _| unreachable!(),
     )
-    .test(|_| Ok(()))
+    .test(|_| Ok(())).await;
 }
 
-#[test]
-fn it_pings() {
+#[tokio::test]
+async fn it_connects_with_password() {
     TestingShim::new(
         |_, _| unreachable!(),
         |_| unreachable!(),
         |_, _, _| unreachable!(),
     )
-    .test(|db| db.ping().map(|_| ()))
+        .test_with_password(|_| Ok(()), "foo".to_string(), "bar".to_string()).await;
 }
 
-#[test]
-fn empty_response() {
+#[tokio::test]
+#[should_panic]
+async fn it_connects_with_wrong_password() {
+    TestingShim::new(
+        |_, _| unreachable!(),
+        |_| unreachable!(),
+        |_, _, _| unreachable!(),
+    )
+        .test_with_password(|_| Ok(()), "foo".to_string(), "bar1".to_string()).await;
+}
+
+#[tokio::test]
+async fn it_pings() {
+    TestingShim::new(
+        |_, _| unreachable!(),
+        |_| unreachable!(),
+        |_, _, _| unreachable!(),
+    )
+    .test(|db| db.ping().map(|_| ())).await;
+}
+
+#[tokio::test]
+async fn empty_response() {
     TestingShim::new(
         |_, w| w.completed(0, 0),
         |_| unreachable!(),
@@ -144,11 +215,11 @@ fn empty_response() {
                 assert_eq!(rs.len(), 0);
                 Ok(())
             })
-    })
+    }).await;
 }
 
-#[test]
-fn no_rows() {
+#[tokio::test]
+async fn no_rows() {
     let cols = [Column {
         table: String::new(),
         column: "a".to_owned(),
@@ -167,11 +238,11 @@ fn no_rows() {
                 assert_eq!(rs.len(), 0);
                 Ok(())
             })
-    })
+    }).await;
 }
 
-#[test]
-fn no_columns() {
+#[tokio::test]
+async fn no_columns() {
     TestingShim::new(
         move |_, w| w.start(&[])?.finish(),
         |_| unreachable!(),
@@ -184,11 +255,11 @@ fn no_columns() {
                 assert_eq!(rs.len(), 0);
                 Ok(())
             })
-    })
+    }).await;
 }
 
-#[test]
-fn no_columns_but_rows() {
+#[tokio::test]
+async fn no_columns_but_rows() {
     TestingShim::new(
         move |_, w| w.start(&[])?.write_col(42).map(|_| ()),
         |_| unreachable!(),
@@ -201,11 +272,11 @@ fn no_columns_but_rows() {
                 assert_eq!(rs.len(), 0);
                 Ok(())
             })
-    })
+    }).await;
 }
 
-#[test]
-fn really_long_query() {
+#[tokio::test]
+async fn really_long_query() {
     let long = "CREATE TABLE `stories` (`id` int unsigned NOT NULL AUTO_INCREMENT PRIMARY KEY, `always_null` int, `created_at` datetime, `user_id` int unsigned, `url` varchar(250) DEFAULT '', `title` varchar(150) DEFAULT '' NOT NULL, `description` mediumtext, `short_id` varchar(6) DEFAULT '' NOT NULL, `is_expired` tinyint(1) DEFAULT 0 NOT NULL, `is_moderated` tinyint(1) DEFAULT 0 NOT NULL, `markeddown_description` mediumtext, `story_cache` mediumtext, `merged_story_id` int, `unavailable_at` datetime, `twitter_id` varchar(20), `user_is_author` tinyint(1) DEFAULT 0,  INDEX `index_stories_on_created_at`  (`created_at`), fulltext INDEX `index_stories_on_description`  (`description`),   INDEX `is_idxes`  (`is_expired`, `is_moderated`),  INDEX `index_stories_on_is_expired`  (`is_expired`),  INDEX `index_stories_on_is_moderated`  (`is_moderated`),  INDEX `index_stories_on_merged_story_id`  (`merged_story_id`), UNIQUE INDEX `unique_short_id`  (`short_id`), fulltext INDEX `index_stories_on_story_cache`  (`story_cache`), fulltext INDEX `index_stories_on_title`  (`title`),  INDEX `index_stories_on_twitter_id`  (`twitter_id`),  INDEX `url`  (`url`(191)),  INDEX `index_stories_on_user_id`  (`user_id`)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;";
     TestingShim::new(
         move |q, w| {
@@ -215,11 +286,11 @@ fn really_long_query() {
         |_| unreachable!(),
         |_, _, _| unreachable!(),
     )
-    .test(move |db| db.drop_query(long).map(|_| ()))
+    .test(move |db| db.drop_query(long).map(|_| ())).await;
 }
 
-#[test]
-fn error_response() {
+#[tokio::test]
+async fn error_response() {
     let err = (ErrorKind::ER_NO, "clearly not".to_string());
     let err_to_move = err.clone();
     TestingShim::new(
@@ -250,11 +321,11 @@ fn error_response() {
             }
             Ok(())
         })
-    })
+    }).await;
 }
 
-#[test]
-fn empty_on_drop() {
+#[tokio::test]
+async fn empty_on_drop() {
     let cols = [Column {
         table: String::new(),
         column: "a".to_owned(),
@@ -273,11 +344,11 @@ fn empty_on_drop() {
                 assert_eq!(rs.len(), 0);
                 Ok(())
             })
-    })
+    }).await;
 }
 
-#[test]
-fn it_queries_nulls() {
+#[tokio::test]
+async fn it_queries_nulls() {
     TestingShim::new(
         |_, w| {
             let cols = &[Column {
@@ -302,11 +373,11 @@ fn it_queries_nulls() {
                 assert_eq!(rs[0][0], mysql_async::Value::NULL);
                 Ok(())
             })
-    })
+    }).await;
 }
 
-#[test]
-fn it_queries() {
+#[tokio::test]
+async fn it_queries() {
     TestingShim::new(
         |_, w| {
             let cols = &[Column {
@@ -331,11 +402,11 @@ fn it_queries() {
                 assert_eq!(rs[0].get::<i16, _>(0), Some(1024));
                 Ok(())
             })
-    })
+    }).await;
 }
 
-#[test]
-fn it_queries_many_rows() {
+#[tokio::test]
+async fn it_queries_many_rows() {
     TestingShim::new(
         |_, w| {
             let cols = &[
@@ -375,11 +446,11 @@ fn it_queries_many_rows() {
                 assert_eq!(rs[1].get::<i16, _>(1), Some(1025));
                 Ok(())
             })
-    })
+    }).await;
 }
 
-#[test]
-fn it_prepares() {
+#[tokio::test]
+async fn it_prepares() {
     let cols = vec![Column {
         table: String::new(),
         column: "a".to_owned(),
@@ -426,11 +497,11 @@ fn it_prepares() {
                 assert_eq!(rs[0].get::<i16, _>(0), Some(1024));
                 Ok(())
             })
-    })
+    }).await;
 }
 
-#[test]
-fn insert_exec() {
+#[tokio::test]
+async fn insert_exec() {
     let params = vec![
         Column {
             table: String::new(),
@@ -548,11 +619,11 @@ fn insert_exec() {
             assert_eq!(res.last_insert_id(), Some(1));
             Ok(())
         })
-    })
+    }).await;
 }
 
-#[test]
-fn send_long() {
+#[tokio::test]
+async fn send_long() {
     let cols = vec![Column {
         table: String::new(),
         column: "a".to_owned(),
@@ -599,11 +670,11 @@ fn send_long() {
                 assert_eq!(rs[0].get::<i16, _>(0), Some(1024));
                 Ok(())
             })
-    })
+    }).await;
 }
 
-#[test]
-fn it_prepares_many() {
+#[tokio::test]
+async fn it_prepares_many() {
     let cols = vec![
         Column {
             table: String::new(),
@@ -653,11 +724,11 @@ fn it_prepares_many() {
                 assert_eq!(rs[1].get::<i16, _>(1), Some(1025));
                 Ok(())
             })
-    })
+    }).await;
 }
 
-#[test]
-fn prepared_empty() {
+#[tokio::test]
+async fn prepared_empty() {
     let cols = vec![Column {
         table: String::new(),
         column: "a".to_owned(),
@@ -689,11 +760,11 @@ fn prepared_empty() {
                 assert_eq!(rs.len(), 0);
                 Ok(())
             })
-    })
+    }).await;
 }
 
-#[test]
-fn prepared_no_params() {
+#[tokio::test]
+async fn prepared_no_params() {
     let cols = vec![Column {
         table: String::new(),
         column: "a".to_owned(),
@@ -724,11 +795,11 @@ fn prepared_no_params() {
                 assert_eq!(rs[0].get::<i16, _>(0), Some(1024));
                 Ok(())
             })
-    })
+    }).await;
 }
 
-#[test]
-fn prepared_nulls() {
+#[tokio::test]
+async fn prepared_nulls() {
     let cols = vec![
         Column {
             table: String::new(),
@@ -797,11 +868,11 @@ fn prepared_nulls() {
             assert_eq!(rs[0].get::<i16, _>(1), Some(42));
             Ok(())
         })
-    })
+    }).await;
 }
 
-#[test]
-fn prepared_no_rows() {
+#[tokio::test]
+async fn prepared_no_rows() {
     let cols = vec![Column {
         table: String::new(),
         column: "a".to_owned(),
@@ -822,11 +893,11 @@ fn prepared_no_rows() {
                 assert_eq!(rs.len(), 0);
                 Ok(())
             })
-    })
+    }).await;
 }
 
-#[test]
-fn prepared_no_cols_but_rows() {
+#[tokio::test]
+async fn prepared_no_cols_but_rows() {
     TestingShim::new(
         |_, _| unreachable!(),
         |_| 0,
@@ -839,11 +910,11 @@ fn prepared_no_cols_but_rows() {
                 assert_eq!(rs.len(), 0);
                 Ok(())
             })
-    })
+    }).await;
 }
 
-#[test]
-fn prepared_no_cols() {
+#[tokio::test]
+async fn prepared_no_cols() {
     TestingShim::new(
         |_, _| unreachable!(),
         |_| 0,
@@ -856,5 +927,5 @@ fn prepared_no_cols() {
                 assert_eq!(rs.len(), 0);
                 Ok(())
             })
-    })
+    }).await;
 }

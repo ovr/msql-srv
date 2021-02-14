@@ -4,6 +4,7 @@ use crate::packet::PacketWriter;
 use crate::{Column, ErrorKind};
 use byteorder::{LittleEndian, WriteBytesExt};
 use std::io::{self, Write};
+use myc::constants::{UTF8_GENERAL_CI, CapabilityFlags};
 
 pub(crate) fn write_eof_packet<W: Write>(
     w: &mut PacketWriter<W>,
@@ -25,6 +26,46 @@ pub(crate) fn write_ok_packet<W: Write>(
     w.write_lenenc_int(last_insert_id)?;
     w.write_u16::<LittleEndian>(s.bits())?;
     w.write_all(&[0x00, 0x00])?; // no warnings
+    w.end_packet()
+}
+
+pub(crate) fn write_auth_switch_packet<W: Write>(
+    w: &mut PacketWriter<W>,
+    auth_plugin: &[u8],
+    nonce: &[u8],
+) -> io::Result<()> {
+    w.write_u8(0xfe)?;
+    w.write_all(auth_plugin)?;
+    w.write_u8(0x00)?;
+    w.write_all(nonce)?;
+    w.write_u8(0x00)?;
+    w.end_packet()
+}
+
+pub(crate) fn write_handshake_packet<W: Write>(
+    w: &mut PacketWriter<W>,
+    connection_id: u32,
+    auth_plugin: &[u8],
+) -> io::Result<()> {
+    w.write_all(&[10])?; // protocol 10
+
+    // 5.1.10 because that's what Ruby's ActiveRecord requires
+    w.write_all(&b"5.1.10-alpha-msql-proxy\0"[..])?;
+
+    let capabilities = CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_PLUGIN_AUTH | CapabilityFlags::CLIENT_SECURE_CONNECTION;
+
+    w.write_u32::<LittleEndian>(connection_id)?;
+    w.write_all(&b";X,po_k}\0"[..])?; // auth seed
+    w.write_u16::<LittleEndian>(capabilities.bits() as u16)?;
+    w.write_u8(UTF8_GENERAL_CI as u8)?; // UTF8_GENERAL_CI
+    w.write_u16::<LittleEndian>(0)?; // status flags
+    w.write_u16::<LittleEndian>((capabilities.bits() >> 16) as u16)?; // extended capabilities
+    w.write_u8(0)?; // scramble length
+    w.write_all(&[0x00; 6][..])?; // filler
+    w.write_all(&[0x00; 4][..])?; // filler
+    w.write_all(&b">o6^Wz!/kM}N\0"[..])?; // 4.1+ servers must extend salt
+    w.write_all(auth_plugin)?;
+    w.write_all(b"\0")?;
     w.end_packet()
 }
 
@@ -80,7 +121,6 @@ where
     let mut empty = true;
     for c in i {
         let c = c.borrow();
-        use crate::myc::constants::UTF8_GENERAL_CI;
         w.write_lenenc_str(b"def")?;
         w.write_lenenc_str(b"")?;
         w.write_lenenc_str(c.table.as_bytes())?;
