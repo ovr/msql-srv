@@ -16,7 +16,6 @@ use std::io::Cursor;
 use tokio::net::TcpListener;
 use async_trait::async_trait;
 use tokio::task;
-use myc::scramble::scramble_native;
 
 struct TestingShim<Q, P, E> {
     columns: Vec<Column>,
@@ -66,10 +65,9 @@ where
         (self.on_q)(query, results)
     }
 
-    async fn on_auth<'a>(&'a mut self, user: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>, Self::Error> {
+    async fn on_auth<'a>(&'a mut self, user: Vec<u8>) -> Result<Option<Vec<u8>>, Self::Error> {
         Ok(if user == b"foo" {
-            let nonce = vec![0x01, 0x02, 0x03, 0x04];
-            Some((nonce.clone(), scramble_native(nonce.as_slice(), b"bar").unwrap().to_vec()))
+            Some(b"bar".to_vec())
         } else {
             None
         })

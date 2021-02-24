@@ -46,26 +46,29 @@ pub(crate) fn write_handshake_packet<W: Write>(
     w: &mut PacketWriter<W>,
     connection_id: u32,
     auth_plugin: &[u8],
+    nonce: &[u8],
 ) -> io::Result<()> {
     w.write_all(&[10])?; // protocol 10
 
     // 5.1.10 because that's what Ruby's ActiveRecord requires
     w.write_all(&b"5.1.10-alpha-msql-proxy\0"[..])?;
 
-    let capabilities = CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_PLUGIN_AUTH | CapabilityFlags::CLIENT_SECURE_CONNECTION;
+    let capabilities = CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_PLUGIN_AUTH | CapabilityFlags::CLIENT_SECURE_CONNECTION | CapabilityFlags::CLIENT_CONNECT_WITH_DB;
 
     w.write_u32::<LittleEndian>(connection_id)?;
-    w.write_all(&b";X,po_k}\0"[..])?; // auth seed
+    w.write_all(&nonce[0..8])?;
+    w.write_u8(0)?;
     w.write_u16::<LittleEndian>(capabilities.bits() as u16)?;
     w.write_u8(UTF8_GENERAL_CI as u8)?; // UTF8_GENERAL_CI
     w.write_u16::<LittleEndian>(0)?; // status flags
     w.write_u16::<LittleEndian>((capabilities.bits() >> 16) as u16)?; // extended capabilities
-    w.write_u8(0)?; // scramble length
+    w.write_u8(nonce.len() as u8 + 1)?; // scramble length
     w.write_all(&[0x00; 6][..])?; // filler
     w.write_all(&[0x00; 4][..])?; // filler
-    w.write_all(&b">o6^Wz!/kM}N\0"[..])?; // 4.1+ servers must extend salt
+    w.write_all(&nonce[8..])?; // 4.1+ servers must extend salt
+    w.write_u8(0)?;
     w.write_all(auth_plugin)?;
-    w.write_all(b"\0")?;
+    w.write_u8(0)?;
     w.end_packet()
 }
 

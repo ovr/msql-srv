@@ -141,6 +141,7 @@ pub use crate::value::{ToMysqlValue, Value, ValueInner};
 use std::io::Cursor;
 use crate::writers::write_handshake_packet;
 use nom::AsBytes;
+use myc::scramble::scramble_native;
 
 /// Implementors of this trait can be used to drive a MySQL-compatible database backend.
 pub trait MysqlShim<W: Write> {
@@ -244,8 +245,17 @@ pub trait AsyncMysqlShim<W: Write + Send> {
         Ok(())
     }
 
+    /// Generate salt for native auth plugin
+    async fn generate_nonce<'a>(&'a mut self) -> Result<Vec<u8>, Self::Error>
+        where
+            W: 'async_trait
+    {
+        let random_bytes: Vec<u8> = (0..20).map(|_| { rand::random::<u8>() }).collect();
+        Ok(random_bytes)
+    }
+
     /// Return Some if auth is required
-    async fn on_auth<'a>(&'a mut self, _user: Vec<u8>) -> Result<Option<(Vec<u8>, Vec<u8>)>, Self::Error>
+    async fn on_auth<'a>(&'a mut self, _user: Vec<u8>) -> Result<Option<Vec<u8>>, Self::Error>
         where
             W: 'async_trait
     {
@@ -507,7 +517,8 @@ impl<B: AsyncMysqlShim<Cursor<Vec<u8>>> + Send, R: AsyncRead + AsyncWrite + Unpi
 
     async fn init(&mut self) -> Result<bool, B::Error> {
         let plugin = b"mysql_native_password";
-        write_handshake_packet(&mut self.writer, 8, plugin)?;
+        let nonce = self.shim.generate_nonce().await?;
+        write_handshake_packet(&mut self.writer, 8, plugin, nonce.as_slice())?;
         self.writer_flush().await?;
 
         let handshake = {
@@ -545,22 +556,31 @@ impl<B: AsyncMysqlShim<Cursor<Vec<u8>>> + Send, R: AsyncRead + AsyncWrite + Unpi
 
         let auth_option = self.shim.on_auth(handshake.username.to_vec()).await?;
 
-        if let Some((nonce, password)) = auth_option {
-            if nonce.is_empty() {
+        if let Some(password) = auth_option {
+            if password.is_empty() {
                 writers::write_err(ErrorKind::ER_PASSWORD_NO_MATCH, b"Incorrect user name or password", &mut self.writer)?;
                 self.writer_flush().await?;
                 return Ok(false);
             } else {
-                writers::write_auth_switch_packet(&mut self.writer, plugin, nonce.as_slice())?;
-                self.writer_flush().await?;
-                let (seq, auth) = self.reader.next_async().await?.ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::ConnectionAborted,
-                        "peer terminated connection",
-                    )
-                })?;
-                self.writer.set_seq(seq + 1);
-                if auth.as_bytes() != password.as_slice() {
+                let encrypted = scramble_native(nonce.as_slice(), password.as_slice()).unwrap();
+
+                let auth =
+                    if handshake.auth_plugin == Some(plugin.to_vec()) {
+                        handshake.auth.clone()
+                    } else {
+                        writers::write_auth_switch_packet(&mut self.writer, plugin, nonce.as_slice())?;
+                        self.writer_flush().await?;
+                        let (seq, auth) = self.reader.next_async().await?.ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::ConnectionAborted,
+                                "peer terminated connection",
+                            )
+                        })?;
+                        self.writer.set_seq(seq + 1);
+                        auth.as_bytes().to_vec()
+                    };
+
+                if auth.as_slice() != encrypted {
                     writers::write_err(ErrorKind::ER_PASSWORD_NO_MATCH, b"Incorrect user name or password", &mut self.writer)?;
                     self.writer_flush().await?;
                     return Ok(false);

@@ -6,6 +6,9 @@ pub struct ClientHandshake {
     maxps: u32,
     collation: u16,
     pub username: Vec<u8>,
+    pub auth: Vec<u8>,
+    pub database: Option<Vec<u8>>,
+    pub auth_plugin: Option<Vec<u8>>,
 }
 
 pub fn client_handshake(i: &[u8]) -> nom::IResult<&[u8], ClientHandshake> {
@@ -14,25 +17,47 @@ pub fn client_handshake(i: &[u8]) -> nom::IResult<&[u8], ClientHandshake> {
 
     let (i, cap) = nom::number::complete::le_u16(i)?;
 
-    if CapabilityFlags::from_bits_truncate(cap as u32).contains(CapabilityFlags::CLIENT_PROTOCOL_41)
+    let capabilities = CapabilityFlags::from_bits_truncate(cap as u32);
+    if capabilities.contains(CapabilityFlags::CLIENT_PROTOCOL_41)
     {
         // HandshakeResponse41
         let (i, cap2) = nom::number::complete::le_u16(i)?;
         let cap = (cap2 as u32) << 16 | cap as u32;
+        let capabilities = CapabilityFlags::from_bits_truncate(cap);
 
         let (i, maxps) = nom::number::complete::le_u32(i)?;
         let (i, collation) = nom::bytes::complete::take(1u8)(i)?;
         let (i, _) = nom::bytes::complete::take(23u8)(i)?;
-        let (i, username) = nom::bytes::complete::take_until(&b"\0"[..])(i)?;
-        let (i, _) = nom::bytes::complete::tag(b"\0")(i)?;
-
+        let (i, username) = parse_zero_terminated_string(i)?;
+        let (i, auth) =
+            if capabilities.contains(CapabilityFlags::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA) ||
+                capabilities.contains(CapabilityFlags::CLIENT_SECURE_CONNECTION) {
+                parse_len_enc_string(i)?
+            } else {
+                parse_zero_terminated_string(i)?
+            };
+        let (i, database) =
+            if capabilities.contains(CapabilityFlags::CLIENT_CONNECT_WITH_DB) {
+                nom::combinator::map(parse_zero_terminated_string, |v| Some(v))(i)?
+            } else {
+                (i, None)
+            };
+        let (i, auth_plugin) =
+            if capabilities.contains(CapabilityFlags::CLIENT_PLUGIN_AUTH) {
+                nom::combinator::map(parse_zero_terminated_string, |v| Some(v))(i)?
+            } else {
+                (i, None)
+            };
         Ok((
             i,
             ClientHandshake {
-                capabilities: CapabilityFlags::from_bits_truncate(cap),
+                capabilities,
                 maxps,
                 collation: u16::from(collation[0]),
-                username: username.to_vec(),
+                username,
+                auth,
+                database,
+                auth_plugin,
             },
         ))
     } else {
@@ -40,15 +65,27 @@ pub fn client_handshake(i: &[u8]) -> nom::IResult<&[u8], ClientHandshake> {
         let (i, maxps1) = nom::number::complete::le_u16(i)?;
         let (i, maxps2) = nom::number::complete::le_u8(i)?;
         let maxps = (maxps2 as u32) << 16 | maxps1 as u32;
-        let (i, username) = nom::bytes::complete::take_until(&b"\0"[..])(i)?;
+        let (i, username) = parse_zero_terminated_string(i)?;
+
+        let (auth, database) =
+            if capabilities.contains(CapabilityFlags::CLIENT_CONNECT_WITH_DB) {
+                let (i, auth) = parse_zero_terminated_string(i)?;
+                let (_, database) = parse_zero_terminated_string(i)?;
+                (auth, Some(database))
+            } else {
+                (i.to_vec(), None)
+            };
 
         Ok((
             i,
             ClientHandshake {
-                capabilities: CapabilityFlags::from_bits_truncate(cap as u32),
+                capabilities,
                 maxps,
                 collation: 0,
-                username: username.to_vec(),
+                username,
+                database,
+                auth,
+                auth_plugin: None
             },
         ))
     }
@@ -92,6 +129,27 @@ pub fn send_long_data(i: &[u8]) -> nom::IResult<&[u8], Command<'_>> {
             data: i,
         },
     ))
+}
+
+pub fn parse_zero_terminated_string(i: &[u8]) -> nom::IResult<&[u8], Vec<u8>> {
+    let (i, bytes) = nom::bytes::complete::take_until(&b"\0"[..])(i)?;
+    let (i, _) = nom::bytes::complete::tag(b"\0")(i)?;
+    Ok((i, bytes.to_vec()))
+}
+
+pub fn parse_len_enc_string(i: &[u8]) -> nom::IResult<&[u8], Vec<u8>> {
+    let (i, len) = parse_len_enc_int(i)?;
+    let (i, bytes) = nom::bytes::complete::take(len)(i)?;
+    Ok((i, bytes.to_vec()))
+}
+
+pub fn parse_len_enc_int(i: &[u8]) -> nom::IResult<&[u8], u64> {
+    nom::branch::alt((
+        nom::sequence::preceded(nom::bytes::complete::tag(&[0xFE]), nom::number::complete::le_u64),
+        nom::combinator::map(nom::sequence::preceded(nom::bytes::complete::tag(&[0xFD]), nom::number::complete::le_u24), |v| v as u64),
+        nom::combinator::map(nom::sequence::preceded(nom::bytes::complete::tag(&[0xFC]), nom::number::complete::le_u16), |v| v as u64),
+        nom::combinator::map(nom::number::complete::le_u8, |v| v as u64),
+    ))(i)
 }
 
 pub fn parse(i: &[u8]) -> nom::IResult<&[u8], Command<'_>> {
@@ -142,9 +200,10 @@ mod tests {
     #[test]
     fn it_parses_handshake() {
         let data = &[
-            0x25, 0x00, 0x00, 0x01, 0x85, 0xa6, 0x3f, 0x20, 0x00, 0x00, 0x00, 0x01, 0x21, 0x00,
+            0x27, 0x00, 0x00, 0x01, 0x85, 0xa6, 0x3f, 0x20, 0x00, 0x00, 0x00, 0x01, 0x21, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x6a, 0x6f, 0x6e, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x6a, 0x6f, 0x6e, 0x00, 0x00, 0x00,
+            0x00,
         ];
         let r = Cursor::new(&data[..]);
         let mut pr = PacketReader::new(r);
