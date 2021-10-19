@@ -554,7 +554,15 @@ impl<B: AsyncMysqlShim<Cursor<Vec<u8>>> + Send, R: AsyncRead + AsyncWrite + Unpi
             handshake
         };
 
-        let auth_option = self.shim.on_auth(handshake.username.to_vec()).await?;
+        let auth_option = match self.shim.on_auth(handshake.username.to_vec()).await {
+            Err(e) => {
+                writers::write_err(ErrorKind::ER_PASSWORD_NO_MATCH, b"Incorrect user name or password", &mut self.writer)?;
+                self.writer_flush().await?;
+
+                return Ok(false);
+            },
+            Ok(v) => v,
+        };
 
         if let Some(password) = auth_option {
             if password.is_empty() {
