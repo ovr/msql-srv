@@ -44,14 +44,15 @@ pub(crate) fn write_auth_switch_packet<W: Write>(
 
 pub(crate) fn write_handshake_packet<W: Write>(
     w: &mut PacketWriter<W>,
+    server_version: &str,
     connection_id: u32,
     auth_plugin: &[u8],
     nonce: &[u8],
 ) -> io::Result<()> {
     w.write_all(&[10])?; // protocol 10
 
-    // 5.1.10 because that's what Ruby's ActiveRecord requires
-    w.write_all(&b"5.1.10-alpha-msql-proxy\0"[..])?;
+    w.write_all(server_version.as_bytes())?;
+    w.write_all(&[0x00])?;
 
     let capabilities = CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_PLUGIN_AUTH | CapabilityFlags::CLIENT_SECURE_CONNECTION | CapabilityFlags::CLIENT_CONNECT_WITH_DB;
 

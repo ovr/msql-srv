@@ -151,6 +151,12 @@ pub trait MysqlShim<W: Write> {
     type Error: From<io::Error>;
 
     /// Called when the client open a connection and Server returns first packet for InitialHandshakePacket
+    fn server_version(&self) -> &str {
+        // 5.1.10 because that's what Ruby's ActiveRecord requires
+        "5.1.10-alpha-msql-proxy"
+    }
+
+    /// Called when the client open a connection and Server returns first packet for InitialHandshakePacket
     fn connection_id(&self) -> u32 {
         u32::from_le_bytes([0x08, 0x00, 0x00, 0x00])
     }
@@ -205,6 +211,12 @@ pub trait AsyncMysqlShim<W: Write + Send> {
     ///
     /// Must implement `From<io::Error>` so that transport-level errors can be lifted.
     type Error: From<io::Error>;
+
+    /// Called when the client open a connection and Server returns first packet for InitialHandshakePacket
+    fn server_version(&self) -> &str {
+        // 5.1.10 because that's what Ruby's ActiveRecord requires
+        "5.1.10-alpha-msql-proxy"
+    }
 
     /// Called when the client open a connection and Server returns first packet for InitialHandshakePacket
     fn connection_id(&self) -> u32 {
@@ -325,8 +337,8 @@ impl<B: MysqlShim<W>, R: Read, W: Write> MysqlIntermediary<B, R, W> {
     fn init(&mut self) -> Result<(), B::Error> {
         self.writer.write_all(&[10])?; // protocol 10
 
-        // 5.1.10 because that's what Ruby's ActiveRecord requires
-        self.writer.write_all(&b"5.1.10-alpha-msql-proxy\0"[..])?;
+        self.writer.write_all(&self.shim.server_version().as_bytes())?;
+        self.writer.write_all(&[0x00])?;
 
         self.writer.write_all(&self.shim.connection_id().to_le_bytes())?;
         self.writer.write_all(&b";X,po_k}\0"[..])?; // auth seed
@@ -528,7 +540,7 @@ impl<B: AsyncMysqlShim<Cursor<Vec<u8>>> + Send, R: AsyncRead + AsyncWrite + Unpi
     async fn init(&mut self) -> Result<bool, B::Error> {
         let plugin = b"mysql_native_password";
         let nonce = self.shim.generate_nonce().await?;
-        write_handshake_packet(&mut self.writer, self.shim.connection_id(), plugin, nonce.as_slice())?;
+        write_handshake_packet(&mut self.writer, self.shim.server_version(), self.shim.connection_id(), plugin, nonce.as_slice())?;
         self.writer_flush().await?;
 
         let handshake = {
