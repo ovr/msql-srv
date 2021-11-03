@@ -150,6 +150,11 @@ pub trait MysqlShim<W: Write> {
     /// Must implement `From<io::Error>` so that transport-level errors can be lifted.
     type Error: From<io::Error>;
 
+    /// Called when the client open a connection and Server returns first packet for InitialHandshakePacket
+    fn connection_id(&self) -> u32 {
+        u32::from_le_bytes([0x08, 0x00, 0x00, 0x00])
+    }
+
     /// Called when the client issues a request to prepare `query` for later execution.
     ///
     /// The provided [`StatementMetaWriter`](struct.StatementMetaWriter.html) should be used to
@@ -200,6 +205,11 @@ pub trait AsyncMysqlShim<W: Write + Send> {
     ///
     /// Must implement `From<io::Error>` so that transport-level errors can be lifted.
     type Error: From<io::Error>;
+
+    /// Called when the client open a connection and Server returns first packet for InitialHandshakePacket
+    fn connection_id(&self) -> u32 {
+        u32::from_le_bytes([0x08, 0x00, 0x00, 0x00])
+    }
 
     /// Called when the client issues a request to prepare `query` for later execution.
     ///
@@ -318,7 +328,7 @@ impl<B: MysqlShim<W>, R: Read, W: Write> MysqlIntermediary<B, R, W> {
         // 5.1.10 because that's what Ruby's ActiveRecord requires
         self.writer.write_all(&b"5.1.10-alpha-msql-proxy\0"[..])?;
 
-        self.writer.write_all(&[0x08, 0x00, 0x00, 0x00])?; // TODO: connection ID
+        self.writer.write_all(&self.shim.connection_id().to_le_bytes())?;
         self.writer.write_all(&b";X,po_k}\0"[..])?; // auth seed
         self.writer.write_all(&[0x00, 0x42])?; // just 4.1 proto
         self.writer.write_all(&[0x21])?; // UTF8_GENERAL_CI
@@ -518,7 +528,7 @@ impl<B: AsyncMysqlShim<Cursor<Vec<u8>>> + Send, R: AsyncRead + AsyncWrite + Unpi
     async fn init(&mut self) -> Result<bool, B::Error> {
         let plugin = b"mysql_native_password";
         let nonce = self.shim.generate_nonce().await?;
-        write_handshake_packet(&mut self.writer, 8, plugin, nonce.as_slice())?;
+        write_handshake_packet(&mut self.writer, self.shim.connection_id(), plugin, nonce.as_slice())?;
         self.writer_flush().await?;
 
         let handshake = {
