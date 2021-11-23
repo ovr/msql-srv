@@ -414,9 +414,11 @@ impl<B: MysqlShim<W>, R: Read, W: Write> MysqlIntermediary<B, R, W> {
                                 w.write_row(iter::once(67108864u32))?;
                                 w.finish()?;
                             }
-                            _ => {
-                                w.completed(0, 0)?;
-                            }
+                            _ => self.shim.on_query(
+                                ::std::str::from_utf8(q)
+                                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+                                w,
+                            )?,
                         }
                     } else if q.starts_with(b"USE ") || q.starts_with(b"use ") {
                         let w = InitWriter {
@@ -658,9 +660,11 @@ impl<B: AsyncMysqlShim<Cursor<Vec<u8>>> + Send, R: AsyncRead + AsyncWrite + Unpi
                                 w.write_row(iter::once(67108864u32))?;
                                 w.finish()?;
                             }
-                            _ => {
-                                w.completed(0, 0)?;
-                            }
+                            _ => self.shim.on_query(
+                                ::std::str::from_utf8(q)
+                                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
+                                w,
+                            ).await?,
                         }
                     } else if q.starts_with(b"USE ") || q.starts_with(b"use ") {
                         let w = InitWriter {
