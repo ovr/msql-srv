@@ -477,7 +477,7 @@ impl<B: MysqlShim<W>, R: Read, W: Write> MysqlIntermediary<B, R, W> {
                         coltype: myc::constants::ColumnType::MYSQL_TYPE_SHORT,
                         colflags: myc::constants::ColumnFlags::UNSIGNED_FLAG,
                     }];
-                    writers::write_column_definitions(cols, &mut self.writer, true)?;
+                    writers::write_column_definitions(cols, &mut self.writer, false, true)?;
                 }
                 Command::Init(schema) => {
                     let w = InitWriter {
@@ -723,7 +723,7 @@ impl<B: AsyncMysqlShim<Cursor<Vec<u8>>> + Send, R: AsyncRead + AsyncWrite + Unpi
                         coltype: myc::constants::ColumnType::MYSQL_TYPE_SHORT,
                         colflags: myc::constants::ColumnFlags::UNSIGNED_FLAG,
                     }];
-                    writers::write_column_definitions(cols, &mut self.writer, true)?;
+                    writers::write_column_definitions(cols, &mut self.writer, false, true)?;
                 }
                 Command::Init(schema) => {
                     let w = InitWriter {

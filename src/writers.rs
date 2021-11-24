@@ -110,14 +110,16 @@ where
     w.write_u16::<LittleEndian>(0)?; // number of warnings
     w.end_packet()?;
 
-    write_column_definitions(pi, w, true)?;
-    write_column_definitions(ci, w, true)
+    write_column_definitions(pi, w, true, false)?;
+    write_column_definitions(ci, w, true, false)
 }
 
+// @link https://dev.mysql.com/doc/internals/en/com-query-response.html#column-definition
 pub(crate) fn write_column_definitions<'a, I, W>(
     i: I,
     w: &mut PacketWriter<W>,
     only_eof_on_nonempty: bool,
+    com_field_list: bool
 ) -> io::Result<()>
 where
     I: IntoIterator<Item = &'a Column>,
@@ -126,19 +128,25 @@ where
     let mut empty = true;
     for c in i {
         let c = c.borrow();
-        w.write_lenenc_str(b"def")?;
-        w.write_lenenc_str(b"")?;
-        w.write_lenenc_str(c.table.as_bytes())?;
-        w.write_lenenc_str(b"")?;
-        w.write_lenenc_str(c.column.as_bytes())?;
-        w.write_lenenc_str(b"")?;
-        w.write_lenenc_int(0xC)?;
-        w.write_u16::<LittleEndian>(UTF8_GENERAL_CI)?;
-        w.write_u32::<LittleEndian>(1024)?;
-        w.write_u8(c.coltype as u8)?;
-        w.write_u16::<LittleEndian>(c.colflags.bits())?;
+        w.write_lenenc_str(b"def")?; // catalog
+        w.write_lenenc_str(b"")?; // schema
+        w.write_lenenc_str(c.table.as_bytes())?; // table
+        w.write_lenenc_str(b"")?; // org_table
+        w.write_lenenc_str(c.column.as_bytes())?; // name
+        w.write_lenenc_str(b"")?; // org_name
+        w.write_lenenc_int(0xC)?; // length of fixed-length fields
+        w.write_u16::<LittleEndian>(UTF8_GENERAL_CI)?; // character set
+        w.write_u32::<LittleEndian>(1024)?; // column length
+        w.write_u8(c.coltype as u8)?; // type
+        w.write_u16::<LittleEndian>(c.colflags.bits())?; // flags
         w.write_all(&[0x00])?; // decimals
-        w.write_all(&[0x00, 0x00])?; // unused
+        w.write_all(&[0x00, 0x00])?; // filler
+
+        if com_field_list {
+            // default value
+            w.write_lenenc_str(b"")?;
+        }
+
         w.end_packet()?;
         empty = false;
     }
@@ -159,5 +167,5 @@ where
     let i = i.into_iter();
     w.write_lenenc_int(i.len() as u64)?;
     w.end_packet()?;
-    write_column_definitions(i, w, false)
+    write_column_definitions(i, w, false, false)
 }
