@@ -55,13 +55,14 @@ pub(crate) fn write_handshake_packet<W: Write>(
     w.write_all(&[0x00])?;
 
     let capabilities = CapabilityFlags::CLIENT_PROTOCOL_41 | CapabilityFlags::CLIENT_PLUGIN_AUTH | CapabilityFlags::CLIENT_SECURE_CONNECTION | CapabilityFlags::CLIENT_CONNECT_WITH_DB;
+    let server_status = StatusFlags::SERVER_STATUS_AUTOCOMMIT;
 
     w.write_u32::<LittleEndian>(connection_id)?;
     w.write_all(&nonce[0..8])?;
     w.write_u8(0)?;
     w.write_u16::<LittleEndian>(capabilities.bits() as u16)?;
     w.write_u8(UTF8_GENERAL_CI as u8)?; // UTF8_GENERAL_CI
-    w.write_u16::<LittleEndian>(0)?; // status flags
+    w.write_u16::<LittleEndian>(server_status.bits())?; // status flags
     w.write_u16::<LittleEndian>((capabilities.bits() >> 16) as u16)?; // extended capabilities
     w.write_u8(nonce.len() as u8 + 1)?; // scramble length
     w.write_all(&[0x00; 6][..])?; // filler

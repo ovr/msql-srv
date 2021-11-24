@@ -335,21 +335,9 @@ impl<B: MysqlShim<W>, R: Read, W: Write> MysqlIntermediary<B, R, W> {
     }
 
     fn init(&mut self) -> Result<(), B::Error> {
-        self.writer.write_all(&[10])?; // protocol 10
-
-        self.writer.write_all(&self.shim.server_version().as_bytes())?;
-        self.writer.write_all(&[0x00])?;
-
-        self.writer.write_all(&self.shim.connection_id().to_le_bytes())?;
-        self.writer.write_all(&b";X,po_k}\0"[..])?; // auth seed
-        self.writer.write_all(&[0x00, 0x42])?; // just 4.1 proto
-        self.writer.write_all(&[0x21])?; // UTF8_GENERAL_CI
-        self.writer.write_all(&[0x00, 0x00])?; // status flags
-        self.writer.write_all(&[0x00, 0x00])?; // extended capabilities
-        self.writer.write_all(&[0x00])?; // no plugins
-        self.writer.write_all(&[0x00; 6][..])?; // filler
-        self.writer.write_all(&[0x00; 4][..])?; // filler
-        self.writer.write_all(&b">o6^Wz!/kM}N\0"[..])?; // 4.1+ servers must extend salt
+        let plugin = b"mysql_native_password";
+        let nonce = b";X,po_k}>o6^Wz!/kM}N";
+        write_handshake_packet(&mut self.writer, self.shim.server_version(), self.shim.connection_id(), plugin, nonce.as_bytes())?;
         self.writer.flush()?;
 
         {
@@ -579,7 +567,7 @@ impl<B: AsyncMysqlShim<Cursor<Vec<u8>>> + Send, R: AsyncRead + AsyncWrite + Unpi
         };
 
         let auth_option = match self.shim.on_auth(handshake.username.to_vec()).await {
-            Err(e) => {
+            Err(_) => {
                 writers::write_err(ErrorKind::ER_PASSWORD_NO_MATCH, b"Incorrect user name or password", &mut self.writer)?;
                 self.writer_flush().await?;
 
