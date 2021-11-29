@@ -73,7 +73,7 @@
 //!         }
 //!     });
 //!
-//!     let mut db = mysql::Conn::new(&format!("mysql://127.0.0.1:{}", port)).unwrap();
+//!     let mut db = mysql::Conn::new(mysql::Opts::from_url(&format!("mysql://127.0.0.1:{}", port)).unwrap()).unwrap();
 //!     assert_eq!(db.ping(), true);
 //!     assert_eq!(db.query_iter("SELECT a, b FROM foo").unwrap().count(), 1);
 //!     drop(db);
@@ -353,17 +353,17 @@ impl<B: MysqlShim<W>, R: Read, W: Write> MysqlIntermediary<B, R, W> {
                         io::ErrorKind::UnexpectedEof,
                         "client sent incomplete handshake",
                     ),
-                    nom::Err::Failure((input, nom_e_kind))
-                    | nom::Err::Error((input, nom_e_kind)) => {
-                        if let nom::error::ErrorKind::Eof = nom_e_kind {
+                    nom::Err::Failure(nom_err)
+                    | nom::Err::Error(nom_err) => {
+                        if let nom::error::ErrorKind::Eof = nom_err.code {
                             io::Error::new(
                                 io::ErrorKind::UnexpectedEof,
-                                format!("client did not complete handshake; got {:?}", input),
+                                format!("client did not complete handshake; got {:?}", nom_err.input),
                             )
                         } else {
                             io::Error::new(
                                 io::ErrorKind::InvalidData,
-                                format!("bad client handshake; got {:?} ({:?})", input, nom_e_kind),
+                                format!("bad client handshake; got {:?} ({:?})", nom_err.input, nom_err.code),
                             )
                         }
                     }
@@ -557,17 +557,17 @@ impl<B: AsyncMysqlShim<Cursor<Vec<u8>>> + Send, R: AsyncRead + AsyncWrite + Unpi
                         io::ErrorKind::UnexpectedEof,
                         "client sent incomplete handshake",
                     ),
-                    nom::Err::Failure((input, nom_e_kind))
-                    | nom::Err::Error((input, nom_e_kind)) => {
-                        if let nom::error::ErrorKind::Eof = nom_e_kind {
+                    nom::Err::Failure(nom_err)
+                    | nom::Err::Error(nom_err) => {
+                        if let nom::error::ErrorKind::Eof = nom_err.code {
                             io::Error::new(
                                 io::ErrorKind::UnexpectedEof,
-                                format!("client did not complete handshake; got {:?}", input),
+                                format!("client did not complete handshake; got {:?}", nom_err.input),
                             )
                         } else {
                             io::Error::new(
                                 io::ErrorKind::InvalidData,
-                                format!("bad client handshake; got {:?} ({:?})", input, nom_e_kind),
+                                format!("bad client handshake; got {:?} ({:?})", nom_err.input, nom_err.code),
                             )
                         }
                     }

@@ -23,19 +23,18 @@ codecov = { repository = "jonhoo/msql-srv", branch = "master", service = "github
 maintenance = { status = "experimental" }
 
 [dependencies]
-nom = "5"
-mysql_common = "0.22"
-byteorder = "1"
+nom = "7"
+mysql_common = { git = 'https://github.com/ovr/rust_mysql_common.git', rev = "865224470f973d5247d313fa890363d8fb9fc44e", features = ["chrono"] }
+byteorder = "1.4"
 chrono = "0.4"
-time = "=0.2.7"
 tokio = { version = "1.0", features = ["io-util", "io-std"] }
 async-trait = "0.1.40"
 rand = "0.8.3"
 
 [dev-dependencies]
 # postgres = "0.19"
-mysql = "18"
+mysql = "21"
 mysql_async = "0.20.0"
-slab = "0.4.2"
+slab = "0.4.3"
 tokio = { version = "1.0", features = ["full"] }
 futures = "0.1.26"
