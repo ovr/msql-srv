@@ -62,7 +62,11 @@ where
         query: &'a str,
         results: QueryResultWriter<'a, Cursor<Vec<u8>>>,
     ) -> Result<(), Self::Error> {
-        (self.on_q)(query, results)
+        if query.eq_ignore_ascii_case("SELECT @@socket") || query.eq_ignore_ascii_case("SELECT @@wait_timeout") {
+            results.completed(0, 0)
+        } else {
+            (self.on_q)(query, results)
+        }
     }
 
     async fn on_auth<'a>(&'a mut self, user: Vec<u8>) -> Result<Option<Vec<u8>>, Self::Error> {

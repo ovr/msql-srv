@@ -61,7 +61,11 @@ where
         query: &str,
         results: QueryResultWriter<net::TcpStream>,
     ) -> io::Result<()> {
-        (self.on_q)(query, results)
+        if query.eq_ignore_ascii_case("SELECT @@socket") || query.eq_ignore_ascii_case("SELECT @@wait_timeout") {
+            results.completed(0, 0)
+        } else {
+            (self.on_q)(query, results)
+        }
     }
 }
 

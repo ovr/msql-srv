@@ -401,7 +401,18 @@ impl<B: MysqlShim<W>, R: Read, W: Write> MysqlIntermediary<B, R, W> {
                                 let mut w = w.start(cols)?;
                                 w.write_row(iter::once(67108864u32))?;
                                 w.finish()?;
-                            }
+                            },
+                            b"socket" => {
+                                let cols = &[Column {
+                                    table: String::new(),
+                                    column: "@@socket".to_owned(),
+                                    coltype: myc::constants::ColumnType::MYSQL_TYPE_STRING,
+                                    colflags: myc::constants::ColumnFlags::NOT_NULL_FLAG,
+                                }];
+                                let mut w = w.start(cols)?;
+                                w.write_row(iter::once("".to_string()))?;
+                                w.finish()?;
+                            },
                             _ => self.shim.on_query(
                                 ::std::str::from_utf8(q)
                                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?,
